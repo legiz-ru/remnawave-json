@@ -12,12 +12,21 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    if: github.event.release.target_commitish == 'main' || github.event.release.target_commitish == 'dev' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
       packages: write
       
     steps:
+      - name: Validate release branch
+        if: github.event_name == 'release'
+        run: |
+          BRANCH="${{ github.event.release.target_commitish }}"
+          if [[ "$BRANCH" != "main" && "$BRANCH" != "dev" ]]; then
+            echo "❌ Release must be from 'main' or 'dev' branch, got: $BRANCH"
+            exit 1
+          fi
+          echo "✅ Release from allowed branch: $BRANCH"
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -31,16 +40,53 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=tag
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=dev-latest,enable=${{ github.event.release.target_commitish == 'dev' }}
-            type=sha,prefix={{branch}}-,format=short
+      - name: Generate tags
+        id: tags
+        run: |
+          TAGS=""
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          BRANCH="${{ github.event.release.target_commitish || github.ref_name }}"
+          
+          # Добавляем основные теги в зависимости от ветки
+          if [[ "$BRANCH" == "main" ]]; then
+            TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          elif [[ "$BRANCH" == "dev" ]]; then
+            TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev-latest"
+          fi
+          
+          # Добавляем тег с SHA
+          if [[ -n "$TAGS" ]]; then
+            TAGS="$TAGS,${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$BRANCH-$SHORT_SHA"
+          else
+            TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$BRANCH-$SHORT_SHA"
+          fi
+          
+          # Обрабатываем тег релиза (поддерживаем как v1.0.0, так и 1.0.0)
+          if [[ "${{ github.event.release.tag_name }}" != "" ]]; then
+            RELEASE_TAG="${{ github.event.release.tag_name }}"
+            
+            # Добавляем тег как есть
+            TAGS="$TAGS,${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$RELEASE_TAG"
+            
+            # Если тег начинается с 'v', добавляем версию без 'v'
+            if [[ "$RELEASE_TAG" =~ ^v[0-9] ]]; then
+              VERSION_WITHOUT_V="${RELEASE_TAG#v}"
+              TAGS="$TAGS,${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION_WITHOUT_V"
+            fi
+            
+            # Если тег НЕ начинается с 'v', добавляем версию с 'v'
+            if [[ "$RELEASE_TAG" =~ ^[0-9] ]]; then
+              VERSION_WITH_V="v$RELEASE_TAG"
+              TAGS="$TAGS,${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$VERSION_WITH_V"
+            fi
+          fi
+          
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+          echo "Generated tags:"
+          IFS=',' read -ra TAG_ARRAY <<< "$TAGS"
+          for tag in "${TAG_ARRAY[@]}"; do
+            echo "  - $tag"
+          done
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -48,8 +94,15 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=remnawave-json
+            org.opencontainers.image.description=JSON configuration service for remnawave
+            org.opencontainers.image.vendor=legiz-ru
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.event.release.tag_name || github.sha }}
+            org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+            org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -57,10 +110,61 @@ jobs:
         run: |
           echo "## 🚀 Docker Image Built Successfully!" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Repository:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Branch:** \`${{ github.event.release.target_commitish || github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Release:** \`${{ github.event.release.tag_name || 'manual' }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Platforms:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Image Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repository:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** \`${{ github.event.release.target_commitish || github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Release:** \`${{ github.event.release.tag_name || 'manual' }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platforms:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
-          echo '${{ steps.meta.outputs.tags }}' | sed 's/^/- `/' | sed 's/$/`/' >> $GITHUB_STEP_SUMMARY
+          echo "### 🏷️ Available Tags" >> $GITHUB_STEP_SUMMARY
+          IFS=',' read -ra TAG_ARRAY <<< "${{ steps.tags.outputs.tags }}"
+          for tag in "${TAG_ARRAY[@]}"; do
+            echo "- \`$tag\`" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Quick Start" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "# Latest stable" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ github.event.release.tag_name }}" != "" ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "# Specific version" >> $GITHUB_STEP_SUMMARY
+            echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.release.tag_name }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Comment on release
+        if: github.event_name == 'release'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tags = `${{ steps.tags.outputs.tags }}`.split(',');
+            const mainTag = tags.find(tag => tag.includes(':latest')) || tags[0];
+            
+            const comment = `## 🚀 Docker Image Published
+            
+            The Docker image has been built and published successfully!
+            
+            ### 📦 Available Tags
+            ${tags.map(tag => `- \`${tag.split('/').pop()}\``).join('\n')}
+            
+            ### 📋 Quick Start
+            \`\`\`bash
+            docker pull ${mainTag}
+            \`\`\`
+            
+            ### 🔄 Update docker-compose.yml
+            \`\`\`yaml
+            services:
+              remnawave-json:
+                image: ${mainTag}
+                # ... rest of your config
+            \`\`\`
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.payload.release.id,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
