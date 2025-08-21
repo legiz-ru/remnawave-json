@@ -1,16 +1,15 @@
 name: Build and push Docker image
 
 on:
-  push:
-    branches:
-      - main
-      - develop
-    tags:
-      - 'v*'
-  pull_request:
-    branches:
-      - main
+  release:
+    types: [published, created]
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build from current branch'
+        required: false
+        default: false
+        type: boolean
 
 env:
   REGISTRY: ghcr.io
@@ -24,13 +23,36 @@ jobs:
       packages: write
       
     steps:
+      - name: Check if build should proceed
+        id: check
+        run: |
+          BRANCH_NAME="${{ github.event.release.target_commitish || github.ref_name }}"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.force_build }}" == "true" ]]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "✅ Force build requested via workflow_dispatch from branch: $BRANCH_NAME"
+          elif [[ "${{ github.event_name }}" == "release" && ("$BRANCH_NAME" == "main" || "$BRANCH_NAME" == "dev") ]]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "✅ Release from allowed branch: $BRANCH_NAME"
+          else
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            echo "❌ Build skipped - release not from main or dev branch (current: $BRANCH_NAME)"
+            exit 1
+          fi
+
       - name: Checkout repository
+        if: steps.check.outputs.should_build == 'true'
         uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.check.outputs.branch_name }}
 
       - name: Set up Docker Buildx
+        if: steps.check.outputs.should_build == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Container Registry
+        if: steps.check.outputs.should_build == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -38,18 +60,19 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract metadata
+        if: steps.check.outputs.should_build == 'true'
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
             type=ref,event=tag
+            type=raw,value=latest,enable=${{ steps.check.outputs.branch_name == 'main' }}
+            type=raw,value=dev-latest,enable=${{ steps.check.outputs.branch_name == 'dev' }}
             type=sha,prefix={{branch}}-
-            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
+        if: steps.check.outputs.should_build == 'true'
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -61,10 +84,14 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Generate deployment summary
+        if: steps.check.outputs.should_build == 'true'
         run: |
-          echo "## Docker Image Built Successfully! 🚀" >> $GITHUB_STEP_SUMMARY
-          echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
-          echo '${{ steps.meta.outputs.tags }}' | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY
+          echo "## 🚀 Docker Image Built Successfully!" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Repository:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ steps.check.outputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Release:** \`${{ github.event.release.tag_name || 'manual' }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Platforms:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
+          echo '${{ steps.meta.outputs.tags }}' | sed 's/^/- `/' | sed 's/$/`/' >> $GITHUB_STEP_SUMMARY
