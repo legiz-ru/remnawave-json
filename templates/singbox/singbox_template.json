@@ -1,25 +1,33 @@
 {
     "outbounds": [{{range $index, $outbound := .Outbounds}}{{if $index}},{{end}}
         {
-            "type": "{{$outbound.Type}}",
-            "tag": "{{$outbound.Tag}}"{{range $key, $value := $outbound.Config}},
-            "{{$key}}": {{$value}}{{end}}
+        "type": "{{$outbound.Type}}",
+        "tag": "{{$outbound.Tag}}"{{range $key, $value := $outbound.Config}},
+        "{{$key}}": {{$value}}{{end}}
         }{{end}},
         {
-            "tag": "direct",
-            "type": "direct"
+        "tag": "direct",
+        "type": "direct"
         }{{if .V1_10}},
         {
-            "tag": "block",
-            "type": "block"
+        "tag": "block",
+        "type": "block"
         },
         {
-            "tag": "dns-out",
-            "type": "dns"
+        "tag": "exampleoutboundsoutbounds",
+        "type": "selector",
+        "default": "⚡️ Auto",
+        "outbounds": [
+            {{- range $i, $t := .OutboundsTags}}{{if $i}},{{end}}"{{$t}}"{{end}}
+        ]
+        },
+        {
+        "tag": "dns-out",
+        "type": "dns"
         }{{end}},
         {
-            "tag": "bypass",
-            "type": "direct"
+        "tag": "bypass",
+        "type": "direct"
         }
     ],
     "route": {
